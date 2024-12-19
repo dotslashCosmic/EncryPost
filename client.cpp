@@ -7,6 +7,9 @@
 #include <vector>
 #include <thread>
 #include <windows.h>
+#include <sstream>
+#include <vector>
+#include <string>
 #include "encryption.h"
 
 #define PORT 53100
@@ -15,12 +18,16 @@ SOCKET sock;
 HWND hMessageInput, hMessageDisplay, hMnemonicInput, hMnemonicCodeDisplay;
 
 std::string fetchPublicIP() {
-    // Use Winsock to fetch public IP
     WSADATA wsaData;
     SOCKET sock;
     struct sockaddr_in server;
     char buffer[1024];
     std::string ip;
+
+    // Initialize Winsock
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        return "Error fetching IP: WSAStartup failed.";
+    }
 
     WSAStartup(MAKEWORD(2, 2), &wsaData);
     sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -31,7 +38,7 @@ std::string fetchPublicIP() {
     if (connect(sock, (struct sockaddr*)&server, sizeof(server)) < 0) {
         closesocket(sock);
         WSACleanup();
-        return "Error fetching IP";
+        return "Error fetching IP: Unable to connect to the server.";
     }
 
     const char* request = "GET / HTTP/1.1\r\nHost: checkip.amazonaws.com\r\nConnection: close\r\n\r\n";
@@ -51,14 +58,78 @@ std::string fetchPublicIP() {
     return ip;
 }
 
+std::string base64_encode(const unsigned char* bytes_to_encode, unsigned int in_len) {
+    static const std::string base64_chars =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+        "0123456789+/";
+    
+    std::string ret;
+    int i = 0;
+    int j = 0;
+    unsigned char char_array_3[3];
+    unsigned char char_array_4[4];
+
+    while (in_len--) {
+        char_array_3[i++] = *(bytes_to_encode++);
+        if (i == 3) {
+            char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+            char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+            char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+            char_array_4[3] = char_array_3[2] & 0x3f;
+
+            for (i = 0; (i < 4); i++)
+                ret += base64_chars[char_array_4[i]];
+            i = 0;
+        }
+    }
+
+    if (i) {
+        for (j = i; j < 3; j++)
+            char_array_3[j] = '\0';
+
+        char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+        char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+        char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+        char_array_4[3] = char_array_3[2] & 0x3f;
+
+        for (j = 0; (j < i + 1); j++)
+            ret += base64_chars[char_array_4[j]];
+
+        while ((i++ < 3))
+            ret += '=';
+    }
+
+    return ret;
+}
+
 std::string encodeIPToMnemonic(const std::string& ip) {
-    // Simple encoding logic (for demonstration purposes)
-    std::string mnemonic = "mnemonic_" + ip; // Replace with actual encoding logic
+    // Convert IP to binary
+    std::vector<uint8_t> binaryIP;
+    std::istringstream iss(ip);
+    std::string segment;
+    while (std::getline(iss, segment, '.')) {
+        binaryIP.push_back(static_cast<uint8_t>(std::stoi(segment)));
+    }
+
+    // Encode binary IP to base64
+    std::string base64Encoded = base64_encode(binaryIP.data(), binaryIP.size());
+
+    // Add salted words for mnemonic
+    std::vector<std::string> saltWords = {"apple", "banana", "cherry", "date", "elderberry"};
+    std::string mnemonic = base64Encoded;
+    for (const auto& word : saltWords) {
+        mnemonic += "-" + word; // Append salted words
+    }
+
     return mnemonic;
 }
 
+const std::string encryptionKey = "your-encryption-key-32bytes!"; // 32 bytes for AES-256, base it on a hash of the computers UUID
+
 void sendMessage(const std::string& message) {
-    send(sock, message.c_str(), message.length(), 0);
+    std::string encryptedMessage = encrypt(message, encryptionKey);
+    send(sock, encryptedMessage.c_str(), encryptedMessage.length(), 0);
 }
 
 void displayMessage(const std::string& username, const std::string& message) {
@@ -77,6 +148,7 @@ void displayMnemonicCode(const std::string& mnemonic) {
 
 void fetchAndDisplayPublicIP() {
     std::string publicIP = fetchPublicIP();
+    std::cout << "Public IP fetched: " << publicIP << std::endl; // Debug statement
     std::string mnemonicCode = encodeIPToMnemonic(publicIP);
     displayMnemonicCode(mnemonicCode);
 }
@@ -87,6 +159,8 @@ void receiveMessages() {
         int valread = recv(sock, buffer, sizeof(buffer), 0);
         if (valread > 0) {
             buffer[valread] = '\0'; // Null-terminate the received string
+            std::string decryptedMessage = decrypt(std::string(buffer), encryptionKey);
+            std::cout << "Received message: " << decryptedMessage << std::endl;
         }
     }
 }
@@ -241,7 +315,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nShowCmd) {
     RegisterClass(&wc);
 
     HWND hwnd = CreateWindowEx(0, CLASS_NAME, "./cosmic EncryPost",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720,
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 720, 650,
         NULL, NULL, hInstance, NULL);
 
     ShowWindow(hwnd, nShowCmd);
