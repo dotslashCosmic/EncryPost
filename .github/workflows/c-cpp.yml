@@ -23,4 +23,4 @@ jobs:
       run: make distcheck
     - name: Build EncryPost
       run: |
-        g++ -o messenger.exe improved_messenger/client.cpp improved_messenger/mnemonic_utils.cpp improved_messenger/encryption.cpp -lws2_32 -lssl -lcrypto
+        g++ -o messenger.exe *.cpp -lws2_32 -lssl -lcrypto
