@@ -8,14 +8,64 @@
 #include <thread>
 #include <windows.h>
 #include <sstream>
-#include <vector>
-#include <string>
+#include <algorithm>
+#include <chrono>
 #include "encryption.h"
+#include "file_transfer.h"
 
 #define PORT 53100
+#define KNOCK_1 53101
+#define KNOCK_2 53102
+#define KNOCK_3 53103
 
 SOCKET sock;
 HWND hMessageInput, hMessageDisplay, hMnemonicInput, hMnemonicCodeDisplay;
+
+std::string sanitizeUsername(const std::string& username) {
+    std::string sanitized = username;
+    // Trim leading/trailing whitespace
+    sanitized.erase(0, sanitized.find_first_not_of(" \t\n"));
+    sanitized.erase(sanitized.find_last_not_of(" \t\n") + 1);
+
+    // Remove unwanted characters
+    sanitized.erase(std::remove_if(sanitized.begin(), sanitized.end(),
+        [](char c) { return !std::isalnum(c) && c != '_'; }), sanitized.end());
+    
+    // Optionally limit length
+    if (sanitized.length() > 20) {
+        sanitized = sanitized.substr(0, 20);
+    }
+
+    // Reject empty input
+    if (sanitized.empty()) {
+        throw std::invalid_argument("Username cannot be empty.");
+    }
+
+    return sanitized;
+}
+
+std::string sanitizeMessage(const std::string& message) {
+    std::string sanitizedMessage = message; // Create a copy for sanitization
+    if (sanitizedMessage.empty()) {
+        throw std::invalid_argument("Message cannot be empty.");
+    }
+
+    sanitizedMessage.erase(0, sanitizedMessage.find_first_not_of(" \t\n")); // Leading whitespace
+    sanitizedMessage.erase(sanitizedMessage.find_last_not_of(" \t\n") + 1); // Trailing whitespace
+
+    for (char c : message) {
+        // Encode special characters to prevent code execution
+        switch (c) {
+            case '<': sanitizedMessage += "&lt;"; break;
+            case '>': sanitizedMessage += "&gt;"; break;
+            case '&': sanitizedMessage += "&amp;"; break;
+            case '"': sanitizedMessage += "&quot;"; break;
+            case '\'': sanitizedMessage += "&#39;"; break;
+            default: sanitizedMessage += c; // Keep all other characters
+        }
+    }
+    return sanitizedMessage;
+}
 
 std::string fetchPublicIP() {
     WSADATA wsaData;
@@ -63,7 +113,7 @@ std::string base64_encode(const unsigned char* bytes_to_encode, unsigned int in_
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         "abcdefghijklmnopqrstuvwxyz"
         "0123456789+/";
-    
+
     std::string ret;
     int i = 0;
     int j = 0;
@@ -125,9 +175,18 @@ std::string encodeIPToMnemonic(const std::string& ip) {
     return mnemonic;
 }
 
-const std::string encryptionKey = "your-encryption-key-32bytes!"; // 32 bytes for AES-256, base it on a hash of the computers UUID
+std::string encrypt(const std::string& plaintext, const std::string& key);
+std::string decrypt(const std::string& ciphertext, const std::string& key);
+std::string encode_ip(const std::string& ip);
+std::string decode_ip(const std::string& mnemonic);
 
 void sendMessage(const std::string& message) {
+    // Sanitize message
+    std::string sanitizedMessage = sanitizeMessage(message);
+    if (sanitizedMessage.empty()) {
+        std::cerr << "Cannot send an empty message." << std::endl;
+        return; // Prevent sending empty messages
+    }
     std::string encryptedMessage = encrypt(message, encryptionKey);
     send(sock, encryptedMessage.c_str(), encryptedMessage.length(), 0);
 }
@@ -137,9 +196,19 @@ void displayMessage(const std::string& username, const std::string& message) {
     int length = GetWindowTextLength(hMessageDisplay);
     currentText.resize(length);
     GetWindowText(hMessageDisplay, &currentText[0], length + 1);
-    currentText += username + ": " + message + "\r\n"; // Use "\r\n" for proper line breaks in Windows
-    SetWindowText(hMessageDisplay, currentText.c_str());
+    std::string formattedMessage = message;
+    // Check if the message contains a file name (assuming it starts with " \" and ends with \"")
+    if (formattedMessage.find("\"") != std::string::npos) {
+        size_t start = formattedMessage.find("\"");
+        size_t end = formattedMessage.find("\"", start + 1);
+        if (end != std::string::npos) {
+            std::string fileName = formattedMessage.substr(start + 1, end - start - 1);
+            formattedMessage.replace(start, end - start + 1, fileName);
+        }
+    }
+    currentText += username + ": " + formattedMessage + "\r\n"; // Use "\r\n" for proper line breaks in Windows
 
+    SetWindowText(hMessageDisplay, currentText.c_str());
 }
 
 void displayMnemonicCode(const std::string& mnemonic) {
@@ -163,6 +232,136 @@ void receiveMessages() {
             std::cout << "Received message: " << decryptedMessage << std::endl;
         }
     }
+}
+
+struct User {
+    std::string username;
+    int id; // Unique identifier for the user
+};
+
+std::vector<User> users; // Vector to store connected users
+std::vector<int> knockSequence = {KNOCK_1, KNOCK_2, KNOCK_3};
+std::vector<int> receivedKnocks;
+
+std::chrono::steady_clock::time_point knockStartTime;
+const int KNOCK_TIMEOUT_SECONDS = 10; // Timeout for knock sequence
+
+void resetKnockSequence() {
+    receivedKnocks.clear();
+}
+
+bool isKnockSequenceValid() {
+    if (receivedKnocks.size() != knockSequence.size()) {
+        return false;
+    }
+    return std::equal(receivedKnocks.begin(), receivedKnocks.end(), knockSequence.begin());
+}
+
+void handleClient(SOCKET client_sock) {
+    char buffer[1024] = {0};
+    int userId = users.size() + 1; // Generate a unique ID
+    std::string username;
+
+    // Receive username
+    int usernameLength = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
+    if (usernameLength > 0) {
+        buffer[usernameLength] = '\0'; // Null-terminate the received string
+        username = buffer;
+        users.push_back({username, userId}); // Store user info
+    }
+
+    while (true) {
+        int valread = recv(client_sock, buffer, sizeof(buffer) - 1, 0);
+        if (valread <= 0) {
+            std::cerr << "Connection closed or error receiving message" << std::endl;
+            break;
+        }
+        
+        buffer[valread] = '\0'; // Null-terminate the received string
+        std::cout << "Received message from " << username << ": " << buffer << std::endl;
+        // Echo the message back to the client
+        send(client_sock, buffer, valread, 0);
+    }
+    closesocket(client_sock);
+}
+
+void handleKnock(SOCKET knock_client_sock, struct sockaddr_in client_address, SOCKET server_sock, struct sockaddr_in server_address) {
+    receivedKnocks.push_back(ntohs(client_address.sin_port)); // Store the received knock port
+
+    // Check if the knock sequence is valid
+    if (isKnockSequenceValid()) {
+        std::cout << "Valid knock sequence received. Opening main port for connections.\n";
+        server_address.sin_port = htons(PORT);
+        listen(server_sock, 3); // Reuse the same socket for main connections
+        char usernameBuffer[1024] = {0};
+        int usernameLength = recv(knock_client_sock, usernameBuffer, sizeof(usernameBuffer) - 1, 0);
+        if (usernameLength > 0) {
+            usernameBuffer[usernameLength] = '\0'; // Null-terminate the received string
+        }
+        std::string username(usernameBuffer);
+        std::string message = username + " wishes to join the group. Accept? (y/n)";
+        send(knock_client_sock, message.c_str(), message.length(), 0);
+    } else {
+        // Check for timeout
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - knockStartTime).count() > KNOCK_TIMEOUT_SECONDS) {
+            std::cout << "Knock sequence timed out. Resetting...\n";
+            resetKnockSequence();
+        }
+    }
+}
+
+void startServer() {
+    WSADATA wsaData;
+    SOCKET server_sock; 
+    struct sockaddr_in server_address, client_address;
+    int addr_len = sizeof(client_address);
+
+    // Initialize Winsock
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "WSAStartup failed" << std::endl;
+        return;
+    }
+
+    // Create socket
+    if ((server_sock = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
+        perror("Socket creation failed");
+        WSACleanup();
+        return;
+    }
+
+    server_address.sin_family = AF_INET;
+    server_address.sin_addr.s_addr = INADDR_ANY; 
+    server_address.sin_port = htons(PORT);
+
+    // Bind the socket
+    if (bind(server_sock, (struct sockaddr *)&server_address, sizeof(server_address)) < 0) {
+        perror("Bind failed");
+        closesocket(server_sock);
+        WSACleanup();
+        return;
+    }
+
+    // Listen for incoming connections
+    listen(server_sock, 3);
+    std::cout << "Server listening for port knocks...\n";
+
+    // Accept connections in a loop
+    while (true) {
+        SOCKET knock_client_sock = accept(server_sock, (struct sockaddr *)&client_address, &addr_len);
+        if (knock_client_sock < 0) {
+            perror("Accept failed");
+            continue; 
+        }
+
+        knockStartTime = std::chrono::steady_clock::now(); // Start the timer for knock sequence
+        handleKnock(knock_client_sock, client_address, server_sock, server_address);
+        closesocket(knock_client_sock);
+    }
+
+    // Cleanup
+    closesocket(server_sock);
+    WSACleanup();
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -198,6 +397,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 10, 500, 150, 25,
                 hwnd, (HMENU)3, NULL, NULL);
 
+            CreateWindow("BUTTON", "Upload File",
+                WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
+                500, 420, 80, 25,
+                hwnd, (HMENU)4, NULL, NULL); // Add button for file uploading
+
             hMnemonicCodeDisplay = CreateWindow("EDIT", NULL,
                 WS_CHILD | WS_VISIBLE | ES_READONLY | WS_BORDER,
                 10, 540, 600, 25,
@@ -205,6 +409,35 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             break;
         }
         case WM_COMMAND: {
+            if (LOWORD(wParam) == 4) { // Upload File button clicked
+        // Logic to open a file dialog and send the selected file
+            OPENFILENAME ofn;       // common dialog box structure
+            char szFile[260];       // buffer for file name
+
+        // Initialize OPENFILENAME
+            ZeroMemory(&ofn, sizeof(ofn));
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFile = szFile;
+            ofn.lpstrFile[0] = '\0';
+            ofn.nMaxFile = sizeof(szFile);
+            ofn.lpstrFilter = "All\0*.*\0Text\0*.TXT\0";
+            ofn.nFilterIndex = 1;
+            ofn.lpstrFileTitle = NULL;
+            ofn.nMaxFileTitle = 0;
+            ofn.lpstrInitialDir = NULL;
+            ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+        // Display the file dialog box
+            if (GetOpenFileName(&ofn)) {
+                std::string fullPath = ofn.lpstrFile; // Get the full path
+                std::string filename = fullPath.substr(fullPath.find_last_of("\\") + 1); // Extract the file name
+                sendFile(sock, filename.c_str()); // Send the selected file
+                displayMessage("You sent", std::string(" \"") + filename + "\""); // Display file sent message
+            }
+            break;
+        }
+        
             if (LOWORD(wParam) == 1) { // Send button clicked
                 char message[256];
                 GetWindowText(hMessageInput, message, sizeof(message));
@@ -233,68 +466,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     return 0;
 }
 
-void startServer() {
-    WSADATA wsaData;
-    SOCKET server_sock, client_sock;
-    struct sockaddr_in server_address, client_address;
-    int addr_len = sizeof(client_address);
-    char buffer[1024] = {0};
-
-    // Initialize Winsock
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        std::cerr << "WSAStartup failed" << std::endl;
-        return;
-    }
-
-    // Create socket
-    if ((server_sock = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
-        perror("Socket creation failed");
-        WSACleanup();
-        return;
-    }
-
-    server_address.sin_family = AF_INET;
-    server_address.sin_addr.s_addr = INADDR_ANY; // Accept connections from any IP
-    server_address.sin_port = htons(PORT);
-
-    // Bind the socket
-    if (bind(server_sock, (struct sockaddr *)&server_address, sizeof(server_address)) < 0) {
-        perror("Bind failed");
-        closesocket(server_sock);
-        WSACleanup();
-        return;
-    }
-
-    // Listen for incoming connections
-    listen(server_sock, 3);
-    std::cout << "Server listening on port " << PORT << "...\n";
-
-    // Accept a connection
-    if ((client_sock = accept(server_sock, (struct sockaddr *)&client_address, &addr_len)) < 0) {
-        perror("Accept failed");
-        closesocket(server_sock);
-        WSACleanup();
-        return;
-    }
-
-    // Handle incoming messages
-    while (true) {
-        int valread = recv(client_sock, buffer, 1024, 0);
-        if (valread <= 0) {
-            std::cerr << "Connection closed or error receiving message" << std::endl;
-            break;
-        }
-        std::cout << "Received message: " << buffer << std::endl;
-        // Echo the message back to the client
-        send(client_sock, buffer, valread, 0);
-    }
-
-    // Cleanup
-    closesocket(client_sock);
-    closesocket(server_sock);
-    WSACleanup();
-}
-
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nShowCmd) {
     const char CLASS_NAME[] = "MessengerWindowClass";
 
@@ -302,7 +473,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nShowCmd) {
     std::string username;
     std::cout << "Enter a username: ";
     std::getline(std::cin, username);
-
+    username = sanitizeUsername(username); // Sanitize the username
     // Start the server in a separate thread
     std::thread serverThread(startServer);
     serverThread.detach(); // Detach the thread to run independently
@@ -320,20 +491,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nShowCmd) {
 
     ShowWindow(hwnd, nShowCmd);
 
-    // Initialize Winsock and connect to server
-    WSADATA wsaData;
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
-    sock = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in server_address;
-    server_address.sin_family = AF_INET;
-    server_address.sin_port = htons(PORT);
-    server_address.sin_addr.s_addr = inet_addr("127.0.0.1"); // Connect to localhost
-
-    connect(sock, (struct sockaddr*)&server_address, sizeof(server_address));
-
     // Start receiving messages in a separate thread
     std::thread(receiveMessages).detach();
-
+    
     // Message loop
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {

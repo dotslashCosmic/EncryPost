@@ -2,6 +2,8 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
+const std::string encryptionKey = "your-encryption-key-32bytes!"; // 32 bytes for AES-256
+
 std::string encrypt(const std::string& plaintext, const std::string& key) {
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     std::string ciphertext(plaintext.size() + EVP_MAX_BLOCK_LENGTH, '\0');
