@@ -1,3 +1,4 @@
+
 #include <iostream>
 #include <string>
 #include <cstring>
@@ -10,6 +11,8 @@
 #include <sstream>
 #include <algorithm>
 #include <chrono>
+#include <mutex>
+#include "mnemonic_utils.h"
 #include "encryption.h"
 #include "file_transfer.h"
 
@@ -44,7 +47,10 @@ std::string sanitizeUsername(const std::string& username) {
     return sanitized;
 }
 
+std::mutex userMutex; // Mutex for thread safety
+
 std::string sanitizeMessage(const std::string& message) {
+    const size_t MAX_MESSAGE_LENGTH = 500; // Limit message length
     std::string sanitizedMessage = message; // Create a copy for sanitization
     if (sanitizedMessage.empty()) {
         throw std::invalid_argument("Message cannot be empty.");
@@ -79,7 +85,7 @@ std::string fetchPublicIP() {
         return "Error fetching IP: WSAStartup failed.";
     }
 
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
+    // Initialize Winsock
     sock = socket(AF_INET, SOCK_STREAM, 0);
     server.sin_family = AF_INET;
     server.sin_port = htons(80);
@@ -106,73 +112,6 @@ std::string fetchPublicIP() {
     closesocket(sock);
     WSACleanup();
     return ip;
-}
-
-std::string base64_encode(const unsigned char* bytes_to_encode, unsigned int in_len) {
-    static const std::string base64_chars =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "abcdefghijklmnopqrstuvwxyz"
-        "0123456789+/";
-
-    std::string ret;
-    int i = 0;
-    int j = 0;
-    unsigned char char_array_3[3];
-    unsigned char char_array_4[4];
-
-    while (in_len--) {
-        char_array_3[i++] = *(bytes_to_encode++);
-        if (i == 3) {
-            char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
-            char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
-            char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
-            char_array_4[3] = char_array_3[2] & 0x3f;
-
-            for (i = 0; (i < 4); i++)
-                ret += base64_chars[char_array_4[i]];
-            i = 0;
-        }
-    }
-
-    if (i) {
-        for (j = i; j < 3; j++)
-            char_array_3[j] = '\0';
-
-        char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
-        char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
-        char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
-        char_array_4[3] = char_array_3[2] & 0x3f;
-
-        for (j = 0; (j < i + 1); j++)
-            ret += base64_chars[char_array_4[j]];
-
-        while ((i++ < 3))
-            ret += '=';
-    }
-
-    return ret;
-}
-
-std::string encodeIPToMnemonic(const std::string& ip) {
-    // Convert IP to binary
-    std::vector<uint8_t> binaryIP;
-    std::istringstream iss(ip);
-    std::string segment;
-    while (std::getline(iss, segment, '.')) {
-        binaryIP.push_back(static_cast<uint8_t>(std::stoi(segment)));
-    }
-
-    // Encode binary IP to base64
-    std::string base64Encoded = base64_encode(binaryIP.data(), binaryIP.size());
-
-    // Add salted words for mnemonic
-    std::vector<std::string> saltWords = {"apple", "banana", "cherry", "date", "elderberry"};
-    std::string mnemonic = base64Encoded;
-    for (const auto& word : saltWords) {
-        mnemonic += "-" + word; // Append salted words
-    }
-
-    return mnemonic;
 }
 
 std::string encrypt(const std::string& plaintext, const std::string& key);
@@ -216,9 +155,11 @@ void displayMnemonicCode(const std::string& mnemonic) {
 }
 
 void fetchAndDisplayPublicIP() {
-    std::string publicIP = fetchPublicIP();
-    std::cout << "Public IP fetched: " << publicIP << std::endl; // Debug statement
-    std::string mnemonicCode = encodeIPToMnemonic(publicIP);
+    // Disabled for now
+    // std::string publicIP = fetchPublicIP();
+    // std::cout << "Public IP fetched: " << publicIP << std::endl;
+    // std::string mnemonicCode = encode_ip(publicIP);
+    std::string mnemonicCode = encode_ip("127.0.0.1");
     displayMnemonicCode(mnemonicCode);
 }
 
