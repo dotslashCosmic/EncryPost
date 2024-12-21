@@ -9,4 +9,4 @@ To compile the project, use the following command:
 ```bash
 g++ -o messenger.exe *.cpp -lws2_32 -lcrypto -lcomdlg32
 ```
-SHA-3-512: 453a2003011112291b6f37c5350ef0d654717ba559ef489f4d28fc2b2ebc1874ff690820487aa8ea218b649bdda9cc78e380262be6578baf7fc4cf748eaab44a
+SHA-3-512: 3f2246312ad2de8f971b6e8aced15df1d4d749edab282d12d409189ae138fb765efa7eb01492a128cdd11054117472f27c0a9435650a210d639299acd6bf53c1
